@@ -1,0 +1,620 @@
+﻿Here is an in-depth, step-by-step tutorial to create the WinSecSentinel application. This guide will walk you through setting up the
+project, creating the necessary classes, designing the user 
+interface, and writing the logic to tie everything together.
+
+Step 1: Project Setup ⚙️
+First, you'll need to create a new project in Visual Studio.
+
+Open Visual Studio.
+
+Select Create a new project.
+
+In the "Create a new project" window, search for and select Windows Forms App (.NET Framework). Make sure you select the C# version.
+
+Click Next.
+
+Name your project WinSecSentinel and choose a location to save it.
+
+Select a .NET Framework version (e.g., .NET Framework 4.7.2 or later).
+
+Click Create.
+
+Step 2: Install Necessary Dependencies 📦
+This project relies on a few external libraries that you can install via the NuGet Package Manager.
+
+In Visual Studio, go to Tools -> NuGet Package Manager -> Manage NuGet Packages for Solution....
+
+In the "Browse" tab, search for and install the following packages:
+
+Newtonsoft.Json: Used for working with JSON data, which is essential for the file integrity monitor and the Google Safe Browsing feature.
+
+NetFwTypeLib: This is a COM library for interacting with the Windows Firewall. To add a reference to it:
+
+Right-click on References in the Solution Explorer and select Add Reference....
+
+Go to the COM tab, search for NetFwTypeLib, check the box next to it, and click OK.
+
+Step 3: Creating the Core Classes 👨‍💻
+Now, let's create the C# classes that will form the backbone of our security application. For each of the following, 
+right-click on your project in the Solution Explorer, select Add -> Class..., and name the file accordingly.
+
+AppSettings.cs
+This class will hold the application's configuration settings.
+
+C#
+
+using System.Collections.Generic;
+
+namespace WinSecSentinel
+{
+    public class AppSettings
+    {
+        public int TimerIntervalSeconds { get; set; } = 300; // 5 minutes
+        public string HoneypotPath { get; set; } = "FinancialReports"; // Relative to MyDocuments
+        public List<string> MonitoredDirectories { get; set; } = new List<string>
+        {
+            @"C:\Windows\System32"
+        };
+        public List<string> MonitoredRegistryKeys { get; set; } = new List<string>
+        {
+            @"SOFTWARE\Microsoft\Windows\CurrentVersion\Run",
+            @"SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce"
+        };
+    }
+}
+Alerting.cs
+A simple static class to show different levels of alerts to the user.
+
+C#
+
+using System.Windows.Forms;
+
+namespace WinSecSentinel
+{
+    public enum AlertLevel
+    {
+        Informational,
+        Warning,
+        Critical
+    }
+
+    public static class Alerter
+    {
+        public static void ShowAlert(string message, AlertLevel level)
+        {
+            switch (level)
+            {
+                case AlertLevel.Informational:
+                    MessageBox.Show(message, "Information", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    break;
+                case AlertLevel.Warning:
+                    MessageBox.Show(message, "Warning", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    break;
+                case AlertLevel.Critical:
+                    MessageBox.Show(message, "Critical Alert", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    break;
+            }
+        }
+    }
+}
+GoogleSafeBrowsing.cs
+This class will handle the communication with the Google Safe Browsing API to check for malicious URLs. 
+Remember to replace "YOUR_API_KEY" with your actual Google Cloud API key.
+
+C#
+
+using System;
+using System.Net.Http;
+using System.Text;
+using System.Threading.Tasks;
+using Newtonsoft.Json;
+
+namespace WinSecSentinel
+{
+    public class GoogleSafeBrowsing
+    {
+        private readonly HttpClient _httpClient = new HttpClient();
+        private const string ApiKey = "YOUR_API_KEY"; // Replace with your API key
+        private const string ApiUrl = "https://safebrowsing.googleapis.com/v4/threatMatches:find?key=" + ApiKey;
+
+        public async Task<string> CheckUrlAsync(string url)
+        {
+            var request = new
+            {
+                client = new { clientId = "your-app-name", clientVersion = "1.0.0" },
+                threatInfo = new
+                {
+                    threatTypes = new[] { "MALWARE", "SOCIAL_ENGINEERING", "UNWANTED_SOFTWARE", "POTENTIALLY_HARMFUL_APPLICATION" },
+                    platformTypes = new[] { "WINDOWS" },
+                    threatEntryTypes = new[] { "URL" },
+                    threatEntries = new[] { new { url } }
+                }
+            };
+
+            var jsonRequest = JsonConvert.SerializeObject(request);
+            var content = new StringContent(jsonRequest, Encoding.UTF8, "application/json");
+
+            try
+            {
+                var response = await _httpClient.PostAsync(ApiUrl, content);
+                var jsonResponse = await response.Content.ReadAsStringAsync();
+                dynamic result = JsonConvert.DeserializeObject(jsonResponse);
+
+                if (result.matches != null)
+                {
+                    return $"[CRITICAL] The URL '{url}' is flagged as malicious by Google Safe Browsing.";
+                }
+
+                return $"[SAFE] The URL '{url}' is not flagged as malicious by Google Safe Browsing.";
+            }
+            catch (Exception ex)
+            {
+                return $"[ERROR] Could not scan the URL: {ex.Message}";
+            }
+        }
+    }
+}
+FileIntegrityMonitor.cs
+This class is responsible for creating a baseline of file hashes and checking for any changes.
+
+C#
+
+using Newtonsoft.Json;
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Security.Cryptography;
+
+namespace WinSecSentinel
+{
+    public class FileIntegrityMonitor
+    {
+        private const string BaselineFile = "file_baseline.json";
+        private readonly Dictionary<string, string> _baseline = new Dictionary<string, string>();
+
+        public void CreateBaseline(IEnumerable<string> directories)
+        {
+            _baseline.Clear();
+            foreach (var dir in directories)
+            {
+                if (!Directory.Exists(dir)) continue;
+
+                var files = new List<string>();
+                try
+                {
+                    files.AddRange(Directory.GetFiles(dir, "*.*", SearchOption.AllDirectories));
+                }
+                catch (UnauthorizedAccessException ex)
+                {
+                    System.Diagnostics.Debug.WriteLine($"Access denied to directory {dir}: {ex.Message}");
+                    continue;
+                }
+
+                foreach (var file in files)
+                {
+                    try
+                    {
+                        using (var sha256 = SHA256.Create())
+                        using (var stream = File.OpenRead(file))
+                        {
+                            var hash = sha256.ComputeHash(stream);
+                            _baseline[file] = BitConverter.ToString(hash).Replace("-", "").ToLowerInvariant();
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        System.Diagnostics.Debug.WriteLine($"Could not hash file {file}: {ex.Message}");
+                    }
+                }
+            }
+
+            File.WriteAllText(BaselineFile, JsonConvert.SerializeObject(_baseline, Formatting.Indented));
+        }
+
+        public List<string> CheckIntegrity()
+        {
+            var alerts = new List<string>();
+            if (!File.Exists(BaselineFile))
+            {
+                alerts.Add("[WARNING] No baseline file found. Please create one.");
+                return alerts;
+            }
+
+            var previousBaseline = JsonConvert.DeserializeObject<Dictionary<string, string>>(File.ReadAllText(BaselineFile));
+
+            foreach (var entry in previousBaseline)
+            {
+                try
+                {
+                    if (!File.Exists(entry.Key))
+                    {
+                        alerts.Add($"[CRITICAL] File Deleted: {entry.Key}");
+                        continue;
+                    }
+
+                    using (var sha256 = SHA256.Create())
+                    using (var stream = File.OpenRead(entry.Key))
+                    {
+                        var hash = sha256.ComputeHash(stream);
+                        var currentHash = BitConverter.ToString(hash).Replace("-", "").ToLowerInvariant();
+                        if (currentHash != entry.Value)
+                        {
+                            alerts.Add($"[CRITICAL] File Altered: {entry.Key}");
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine($"Error checking file {entry.Key}: {ex.Message}");
+                }
+            }
+            return alerts;
+        }
+    }
+}
+FirewallMonitor.cs
+This class interacts with the Windows Firewall to retrieve a list of rules.
+
+C#
+
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using NetFwTypeLib;
+
+namespace WinSecSentinel
+{
+    public class FirewallMonitor
+    {
+        public List<string> GetFirewallRules()
+        {
+            var rules = new List<string>();
+            try
+            {
+                var firewallPolicy = (INetFwPolicy2)Activator.CreateInstance(Type.GetTypeFromProgID("HNetCfg.FwPolicy2"));
+                rules.AddRange(firewallPolicy.Rules.Cast<INetFwRule>().Select(rule => $"Rule: {rule.Name}, Action: {rule.Action}, Enabled: {rule.Enabled}"));
+            }
+            catch (Exception ex)
+            {
+                rules.Add($"Error getting firewall rules: {ex.Message}");
+            }
+
+            return rules;
+        }
+    }
+}
+HoneypotManager.cs
+This class creates and monitors a "honeypot" directory to detect ransomware-like activity.
+
+C#
+
+using System;
+using System.Diagnostics;
+using System.IO;
+
+namespace WinSecSentinel
+{
+    public class HoneypotManager : IDisposable
+    {
+        private FileSystemWatcher _watcher;
+        public string HoneypotPath { get; private set; }
+        public event Action<string> SuspiciousActivityDetected;
+
+        public HoneypotManager(string honeypotRelativePath)
+        {
+            var documentsPath = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
+            HoneypotPath = Path.Combine(documentsPath, honeypotRelativePath);
+        }
+
+        public string Deploy()
+        {
+            try
+            {
+                if (Directory.Exists(HoneypotPath))
+                {
+                    return HoneypotPath;
+                }
+
+                Directory.CreateDirectory(HoneypotPath);
+
+                File.WriteAllText(Path.Combine(HoneypotPath, "Q4_Sales_Projections.xlsx"), "This is a dummy file.");
+                File.WriteAllText(Path.Combine(HoneypotPath, "Employee_Salaries.docx"), "This is a dummy file.");
+
+                return HoneypotPath;
+            }
+            catch (Exception ex)
+            {
+                // Log the exception
+                return null;
+            }
+        }
+
+        public void StartMonitoring()
+        {
+            if (!Directory.Exists(HoneypotPath))
+            {
+                return;
+            }
+
+            _watcher = new FileSystemWatcher(HoneypotPath)
+            {
+                NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.FileName | NotifyFilters.DirectoryName,
+                IncludeSubdirectories = true,
+                EnableRaisingEvents = true
+            };
+
+            _watcher.Changed += OnSuspiciousActivity;
+            _watcher.Created += OnSuspiciousActivity;
+            _watcher.Deleted += OnSuspiciousActivity;
+            _watcher.Renamed += OnSuspiciousActivity;
+        }
+
+        public void StopMonitoring()
+        {
+            if (_watcher != null)
+            {
+                _watcher.EnableRaisingEvents = false;
+                _watcher.Dispose();
+                _watcher = null;
+            }
+        }
+
+        private void OnSuspiciousActivity(object sender, FileSystemEventArgs e)
+        {
+            var process = GetLockingProcess(e.FullPath);
+            string logMessage = $"Suspicious activity detected: {e.ChangeType} on {e.FullPath}.";
+            if (process != null)
+            {
+                logMessage += $" Process: {process.ProcessName} (ID: {process.Id})";
+            }
+            SuspiciousActivityDetected?.Invoke(logMessage);
+        }
+
+        private Process GetLockingProcess(string filePath)
+        {
+            // This method is a placeholder for a more robust implementation of getting the locking process.
+            // A more reliable way would involve using the Restart Manager API.
+            return null;
+        }
+
+        public void Dispose()
+        {
+            StopMonitoring();
+        }
+    }
+}
+Custom Button Controls
+For a unique user interface, you can create custom button controls.
+
+FuturisticButton.cs
+
+C#
+
+using System.Drawing;
+using System.Windows.Forms;
+
+namespace WinSecSentinel
+{
+    public class FuturisticButton : Button
+    {
+        private readonly Color _glowColor = Color.FromArgb(0, 255, 255); // Cyan
+        private bool _isHovering = false;
+
+        public FuturisticButton()
+        {
+            this.FlatStyle = FlatStyle.Flat;
+            this.FlatAppearance.BorderSize = 0;
+            this.FlatAppearance.MouseOverBackColor = Color.FromArgb(50, 0, 255, 255);
+            this.FlatAppearance.MouseDownBackColor = Color.FromArgb(80, 0, 255, 255);
+            this.BackColor = Color.Transparent;
+            this.ForeColor = Color.FromArgb(224, 225, 221);
+            this.Font = new Font("Segoe UI", 10F, FontStyle.Bold);
+            this.Size = new Size(150, 45);
+        }
+
+        protected override void OnPaint(PaintEventArgs pevent)
+        {
+            base.OnPaint(pevent);
+            if (_isHovering)
+            {
+                using (var pen = new Pen(_glowColor, 2))
+                {
+                    pevent.Graphics.DrawRectangle(pen, 1, 1, this.Width - 2, this.Height - 2);
+                }
+            }
+        }
+
+        protected override void OnMouseEnter(System.EventArgs e)
+        {
+            base.OnMouseEnter(e);
+            _isHovering = true;
+            this.Invalidate();
+        }
+
+        protected override void OnMouseLeave(System.EventArgs e)
+        {
+            base.OnMouseLeave(e);
+            _isHovering = false;
+            this.Invalidate();
+        }
+    }
+}
+NeonButton.cs
+
+C#
+
+using System.Drawing;
+using System.Windows.Forms;
+
+namespace WinSecSentinel
+{
+    public class NeonButton : Button
+    {
+        private readonly Color _buttonColor = ColorTranslator.FromHtml("#343A40");
+        private readonly Color _neonColor = Color.HotPink;
+        private bool _isHovering = false;
+
+        public NeonButton()
+        {
+            this.FlatStyle = FlatStyle.Flat;
+            this.FlatAppearance.BorderSize = 0;
+            this.Font = new Font("Segoe UI Semibold", 9.75F, FontStyle.Bold);
+            this.Size = new Size(150, 40);
+            this.Margin = new Padding(0);
+            this.ForeColor = _neonColor;
+        }
+
+        protected override void OnPaint(PaintEventArgs pevent)
+        {
+            pevent.Graphics.Clear(this.Parent.BackColor);
+
+            using (var brush = new SolidBrush(_isHovering ? ColorTranslator.FromHtml("#495057") : _buttonColor))
+            {
+                pevent.Graphics.FillRectangle(brush, this.ClientRectangle);
+            }
+
+            using (var pen = new Pen(_neonColor, 2))
+            {
+                pevent.Graphics.DrawRectangle(pen, 1, 1, this.Width - 2, this.Height - 2);
+            }
+
+            TextRenderer.DrawText(pevent.Graphics, this.Text, this.Font,
+                this.ClientRectangle, this.ForeColor, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+        }
+
+        protected override void OnMouseEnter(System.EventArgs e)
+        {
+            base.OnMouseEnter(e);
+            _isHovering = true;
+            this.Invalidate();
+        }
+
+        protected override void OnMouseLeave(System.EventArgs e)
+        {
+            base.OnMouseLeave(e);
+            _isHovering = false;
+            this.Invalidate();
+        }
+    }
+}
+After adding these custom controls, rebuild your project by going to Build -> Build Solution. This will make the FuturisticButton and NeonButton appear in your Toolbox, allowing you to drag and drop them onto your form.
+
+Step 4: Designing the User Interface 🎨
+Now, let's design the main form (Form1.cs). Open Form1.cs in the designer view.
+
+Form Properties:
+
+Set the Text property to "WinSecSentinel".
+
+Set the FormBorderStyle to None.
+
+Set the BackColor to a dark color, like 34, 34, 34.
+
+Main Layout: Use Panel controls to create the different sections of the UI. Create a panelMenu on the left for the navigation buttons and a main content area for the different tabs.
+
+Navigation Menu (panelMenu):
+
+Add six FuturisticButton controls to this panel:
+
+btnSystemInfo
+
+btnProcesses
+
+btnAntiPhishing
+
+btnRansomware
+
+btnAdvanced
+
+btnLogs
+
+Set the Text property for each button accordingly.
+
+Content Panels: For each navigation button, create a corresponding Panel that will hold the content for that section. 
+Place these panels on top of each other in the main content area. You will have:
+
+panelSystemInfo
+
+panelProcesses
+
+panelAntiPhishing
+
+panelRansomware
+
+panelAdvanced
+
+panelLogs
+
+Populate the Panels: Add the necessary controls to each panel as described in Form1.Designer.cs. For example:
+
+panelSystemInfo: Add Label controls to display OS version, machine name, and user name.
+
+panelProcesses: Add a ListView with three columns: "Name", "ID", and "Status".
+
+panelAntiPhishing: Add a TextBox (txtUrlToScan), a FuturisticButton (btnScanUrl), and a RichTextBox (rtbPhishingLog).
+
+panelRansomware: Add two FuturisticButton controls (btnDeployHoneypot and btnStopHoneypot) and a RichTextBox (rtbHoneypotLog).
+
+panelAdvanced: Use a TableLayoutPanel to organize three ListBox controls: lbFileIntegrity, lbUserAccounts, and lbNetworkConnections. 
+Add FuturisticButton controls for "Create Baseline" and "Run All Checks".
+
+panelLogs: Add a RichTextBox (rtbAppLog).
+
+Timer: Add a Timer component (monitoringTimer) from the Toolbox to the form.
+
+Step 5: Implementing the UI Logic 🧠
+Now it's time to write the code that brings the user interface to life. Open the code view for Form1.cs.
+
+This file is quite large, so here is a summary of the key parts you need to implement. The full code is in the Form1.cs file you 
+provided.
+
+Class-level Variables:
+
+Create instances of your security modules (PhishingDetector, HoneypotManager, FileIntegrityMonitor, etc.).
+
+Create a list of your content panels (_contentPanels) to easily manage their visibility.
+
+Constructor (Form1()):
+
+Initialize your security modules.
+
+Subscribe to the SuspiciousActivityDetected event from the HoneypotManager.
+
+Call a method to set up the initial state of the UI (e.g., SetupUI()).
+
+Event Handlers:
+
+Navigation Buttons: Create a Click event handler for each navigation button. In each handler, call a method to show the corresponding
+content panel and hide the others (e.g., ShowPanel(panelSystemInfo)).
+
+Anti-Phishing: In the btnScanUrl_Click event handler, get the URL from the text box and call the CheckUrlAsync method from your
+GoogleSafeBrowsing instance.
+
+Ransomware: Implement the Click event handlers for btnDeployHoneypot and btnStopHoneypot to call the respective methods in your 
+HoneypotManager.
+
+File Integrity: In the btnCreateBaseline_Click handler, call _fileIntegrityMonitor.CreateBaseline(). In the btnRunAllChecks_Click 
+handler, call _fileIntegrityMonitor.CheckIntegrity() and display the results.
+
+Form Load (Form1_Load): In this event, you can populate the initial data, like the system information and the list of running processes.
+
+Helper Methods:
+
+ShowPanel(Panel panelToShow): A method that iterates through _contentPanels, hiding all of them except the one passed as an argument.
+
+LogActivity(string message): A method to append messages to the rtbAppLog with a timestamp.
+
+Window Dragging: Since the form has no border, you'll need to implement the code to allow the user to drag the window. 
+This is typically done by handling the MouseDown, MouseMove, and MouseUp events on a top panel.
+
+The full implementation can be found in the provided Form1.cs and Form1.Designer.cs files.
+
+Step 6: Putting It All Together 🎉
+Once you have all the classes, the UI design, and the UI logic in place:
+
+Build the Solution: Go to Build -> Build Solution to compile your application and ensure there are no errors.
+
+Run the Application: Press F5 or click the "Start" button in Visual Studio to run your WinSecSentinel application.
+
+You should now have a fully functional security monitoring tool that you built from scratch! You can now test each of the features, 
+from scanning URLs to deploying a honeypot and checking file integrity.

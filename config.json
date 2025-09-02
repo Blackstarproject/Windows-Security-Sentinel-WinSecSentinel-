@@ -1,0 +1,11 @@
+{
+  "TimerIntervalSeconds": 300,
+  "HoneypotPath": "FinancialReports",
+  "MonitoredDirectories": [
+    "C:\\Windows\\System32"
+  ],
+  "MonitoredRegistryKeys": [
+    "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run",
+    "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\RunOnce"
+  ]
+}
